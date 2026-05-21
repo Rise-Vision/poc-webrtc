@@ -14,6 +14,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import org.webrtc.AudioTrack
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
 import org.webrtc.EglBase
@@ -27,10 +28,7 @@ import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
-import org.webrtc.audio.AudioDeviceModule
-import org.webrtc.audio.AudioRecordDataCallback
 import org.webrtc.audio.JavaAudioDeviceModule
-import java.nio.ByteOrder
 
 class ScreenSharePublisher(
     private val context: Context,
@@ -43,11 +41,28 @@ class ScreenSharePublisher(
     private var peerConnection: PeerConnection? = null
     private var videoCapturer: ScreenCapturerAndroid? = null
     private var videoSource: VideoSource? = null
-    private var audioDeviceModule: AudioDeviceModule? = null
+    private var javaAudioDeviceModule: JavaAudioDeviceModule? = null
     private var playbackAudioCapture: PlaybackAudioCapture? = null
+    private var shareAudioTrack: AudioTrack? = null
+    private val microphoneMuteState = MicrophoneMuteState(microphoneMuted = true)
     private var mediaProjection: MediaProjection? = null
     private var offerCreated = false
     private var peerReadyReceived = false
+    private val debugTonePlayer = MediaTestTonePlayer()
+
+    fun playDebugTestTone() {
+        debugTonePlayer.start()
+        onStatus("Playing test tone (USAGE_MEDIA) — check logcat peak")
+        Log.d(TAG, "Debug test tone started")
+    }
+
+    fun stopDebugTestTone() {
+        debugTonePlayer.stop()
+    }
+
+    fun refreshPlaybackCapture() {
+        playbackAudioCapture?.let { WebRtcAudioInjector.refreshPlaybackCapture(it) }
+    }
 
     fun start(
         resultCode: Int,
@@ -60,6 +75,15 @@ class ScreenSharePublisher(
         // stop() cancels scope; recreate so observeSignaling() actually collects events.
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         this.mediaProjection = mediaProjection
+        mediaProjection.registerCallback(
+            object : MediaProjection.Callback() {
+                override fun onStop() {
+                    onStatus("Media projection ended")
+                    stop()
+                }
+            },
+            android.os.Handler(android.os.Looper.getMainLooper()),
+        )
         Log.d(TAG, "start wsUrl=$wsUrl room=$room")
         // WebRTC must be ready before signaling: peer-ready can arrive immediately on connect.
         initWebRtc(resultCode, resultData, mediaProjection)
@@ -68,24 +92,55 @@ class ScreenSharePublisher(
         onStatus("Connected to signaling. Waiting for browser viewer…")
     }
 
+    fun setMicrophoneMuted(muted: Boolean) {
+        stopDebugTestTone()
+        microphoneMuteState.microphoneMuted.set(muted)
+        updateCaptureModeStatus(muted)
+        javaAudioDeviceModule?.let { module ->
+            WebRtcAudioInjector.applyMicrophoneMute(
+                context,
+                module,
+                playbackAudioCapture,
+                microphoneMuteState,
+                muted,
+            )
+        }
+    }
+
+    private fun updateCaptureModeStatus(microphoneMuted: Boolean) {
+        Log.d(TAG, "Capture mode → ${if (microphoneMuted) "playback" else "microphone"}")
+        if (microphoneMuted) {
+            onStatus("Mic muted — device playback (use Play test tone to verify)")
+        } else {
+            onStatus("Mic live — speak into the phone")
+        }
+    }
+
     fun stop() {
         Log.d(TAG, "stop")
         offerCreated = false
         peerReadyReceived = false
+        microphoneMuteState.microphoneMuted.set(true)
+        debugTonePlayer.stop()
+        // Stop custom capture before disposing native WebRTC (avoids SIGSEGV in webrtc-padded-capture).
+        WebRtcAudioInjector.clear(context)
+        playbackAudioCapture?.release()
+        playbackAudioCapture = null
         videoCapturer?.stopCapture()
         videoCapturer?.dispose()
         videoCapturer = null
         videoSource?.dispose()
         videoSource = null
+        shareAudioTrack?.setEnabled(false)
+        shareAudioTrack?.dispose()
+        shareAudioTrack = null
         peerConnection?.close()
         peerConnection?.dispose()
         peerConnection = null
         peerConnectionFactory?.dispose()
         peerConnectionFactory = null
-        playbackAudioCapture?.stop()
-        playbackAudioCapture = null
-        audioDeviceModule?.release()
-        audioDeviceModule = null
+        javaAudioDeviceModule?.release()
+        javaAudioDeviceModule = null
         mediaProjection?.stop()
         mediaProjection = null
         signalingClient.disconnect()
@@ -103,7 +158,7 @@ class ScreenSharePublisher(
             .createInitializationOptions()
         PeerConnectionFactory.initialize(initOptions)
 
-        audioDeviceModule = createAudioDeviceModule(projection)
+        javaAudioDeviceModule = createAudioDeviceModule(projection)
 
         val encoderFactory = DefaultVideoEncoderFactory(
             eglBase.eglBaseContext,
@@ -115,7 +170,7 @@ class ScreenSharePublisher(
         peerConnectionFactory = PeerConnectionFactory.builder()
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
-            .setAudioDeviceModule(audioDeviceModule)
+            .setAudioDeviceModule(javaAudioDeviceModule)
             .createPeerConnectionFactory()
 
         val factory = peerConnectionFactory ?: return
@@ -136,8 +191,9 @@ class ScreenSharePublisher(
 
         val audioConstraints = MediaConstraints()
         val audioSource = factory.createAudioSource(audioConstraints)
-        val audioTrack = factory.createAudioTrack(AUDIO_TRACK_ID, audioSource)
-        audioTrack.setEnabled(true)
+        shareAudioTrack = factory.createAudioTrack(AUDIO_TRACK_ID, audioSource)
+        shareAudioTrack?.setEnabled(true)
+        updateCaptureModeStatus(microphoneMuteState.microphoneMuted.get())
 
         peerConnection = factory.createPeerConnection(
             rtcConfig(),
@@ -177,44 +233,44 @@ class ScreenSharePublisher(
         )
 
         peerConnection?.addTrack(videoTrack, listOf("stream"))
-        peerConnection?.addTrack(audioTrack, listOf("stream"))
-        Log.d(TAG, "PeerConnection created, tracks added (video+audio)")
+        peerConnection?.addTrack(shareAudioTrack!!, listOf("stream"))
+        Log.d(TAG, "PeerConnection created, tracks added (video + audio)")
         if (peerReadyReceived) {
             Log.d(TAG, "peer-ready arrived early — creating offer now")
             createAndSendOffer()
         }
     }
 
-    private fun createAudioDeviceModule(projection: MediaProjection): AudioDeviceModule {
+    private fun createAudioDeviceModule(projection: MediaProjection): JavaAudioDeviceModule {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            playbackAudioCapture = PlaybackAudioCapture(context, projection)
+        } else {
+            onStatus("API < 29: system audio capture not supported")
+        }
+
         val builder = JavaAudioDeviceModule.builder(context)
             .setUseStereoInput(true)
             .setUseStereoOutput(true)
             .setUseHardwareNoiseSuppressor(false)
             .setUseHardwareAcousticEchoCanceler(false)
+            .setAudioRecordStateCallback(
+                object : JavaAudioDeviceModule.AudioRecordStateCallback {
+                    override fun onWebRtcAudioRecordStart() {
+                        javaAudioDeviceModule?.let { module ->
+                            WebRtcAudioInjector.onWebRtcAudioRecordStart(
+                                context,
+                                module,
+                                playbackAudioCapture,
+                                microphoneMuteState,
+                            )
+                        }
+                    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val capture = PlaybackAudioCapture(projection)
-            if (capture.start()) {
-                playbackAudioCapture = capture
-                onStatus("Capturing system audio (playback capture)")
-                builder.setAudioRecordDataCallback(PlaybackAudioInjector(capture))
-            } else {
-                onStatus("System audio unavailable — sharing video only")
-                builder.setAudioRecordDataCallback(silentAudioCallback)
-            }
-        } else {
-            onStatus("API < 29: system audio capture not supported")
-            builder.setAudioRecordDataCallback(silentAudioCallback)
-        }
+                    override fun onWebRtcAudioRecordStop() = Unit
+                },
+            )
 
         return builder.createAudioDeviceModule()
-    }
-
-    private val silentAudioCallback = AudioRecordDataCallback { _, _, _, audioBuffer ->
-        val silence = ByteArray(audioBuffer.remaining())
-        audioBuffer.clear()
-        audioBuffer.put(silence)
-        audioBuffer.order(ByteOrder.LITTLE_ENDIAN)
     }
 
     private fun observeSignaling() {
@@ -324,6 +380,6 @@ class ScreenSharePublisher(
     companion object {
         private const val TAG = "ScreenSharePublisher"
         private const val VIDEO_TRACK_ID = "screen_video"
-        private const val AUDIO_TRACK_ID = "screen_audio"
+        private const val AUDIO_TRACK_ID = "share_audio"
     }
 }

@@ -77,9 +77,31 @@
 
     let ws = null;
     let pc = null;
+    const remoteAudioElements = new Map();
 
     function log(message) {
       logEl.textContent = `${new Date().toLocaleTimeString()}  ${message}\n` + logEl.textContent;
+    }
+
+    function attachRemoteAudioTrack(track) {
+      let audio = remoteAudioElements.get(track.id);
+      if (!audio) {
+        audio = new Audio();
+        audio.autoplay = true;
+        remoteAudioElements.set(track.id, audio);
+      }
+      audio.srcObject = new MediaStream([track]);
+      audio.volume = 1;
+      audio.muted = false;
+      audio.play().then(() => {
+        log(`Playing audio track id=${track.id}`);
+      }).catch((err) => log(`audio.play(${track.id}): ${err.message}`));
+      track.onmute = () => log(`Audio muted: ${track.id}`);
+      track.onunmute = () => log(`Audio unmuted: ${track.id}`);
+      track.onended = () => {
+        remoteAudioElements.delete(track.id);
+        log(`Audio ended: ${track.id}`);
+      };
     }
 
     function setConnected(connected) {
@@ -96,10 +118,21 @@
       });
 
       pc.ontrack = (event) => {
-        log(`Remote track: ${event.track.kind}`);
-        if (!videoEl.srcObject) {
-          videoEl.srcObject = event.streams[0];
+        log(`Remote track: ${event.track.kind} id=${event.track.id} enabled=${event.track.enabled}`);
+        if (event.track.kind === "audio") {
+          attachRemoteAudioTrack(event.track);
+          return;
         }
+        let stream = videoEl.srcObject;
+        if (!(stream instanceof MediaStream)) {
+          stream = new MediaStream();
+          videoEl.srcObject = stream;
+        }
+        const alreadyAdded = stream.getTracks().some((t) => t.id === event.track.id);
+        if (!alreadyAdded) {
+          stream.addTrack(event.track);
+        }
+        videoEl.play().catch((err) => log(`video.play(): ${err.message}`));
       };
 
       pc.onicecandidate = (event) => {
@@ -114,7 +147,13 @@
         );
       };
 
-      pc.onconnectionstatechange = () => log(`Connection: ${pc.connectionState}`);
+      pc.onconnectionstatechange = () => {
+        log(`Connection: ${pc.connectionState}`);
+        if (pc.connectionState === "connected") {
+          const kinds = pc.getReceivers().map((r) => r.track?.kind ?? "none");
+          log(`Receivers: ${kinds.join(", ") || "none"}`);
+        }
+      };
       return pc;
     }
 

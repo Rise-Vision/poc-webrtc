@@ -8,8 +8,28 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.CAPTURE_MEDIA_OUTPUT"
+        tools:targetApi="34" />
+
+    <!-- Required to resolve UIDs for YouTube/Chrome/etc. on Android 11+ (package visibility). -->
+    <queries>
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.google.android.apps.youtube.music" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.google.android.apps.chrome" />
+        <package android:name="org.mozilla.firefox" />
+        <package android:name="com.google.android.googlequicksearchbox" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.netflix.mediaclient" />
+        <package android:name="com.amazon.avod.thirdpartyclient" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
 
     <application
+        android:allowAudioPlaybackCapture="true"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -31,6 +51,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".PlaybackCaptureTestActivity"
+            android:exported="false"
+            android:label="@string/playback_capture_test_title"
+            android:theme="@style/Theme.POCSharingVideoAudio" />
 
         <service
             android:name=".service.ScreenShareForegroundService"

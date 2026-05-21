@@ -4,4 +4,11 @@
     <string name="screen_share_notification_title">Sharing screen</string>
     <string name="screen_share_notification_body">Screen and audio are being sent to the browser viewer.</string>
     <string name="record_audio_rationale">Microphone permission is required by Android to capture device playback audio during screen share.</string>
+    <string name="mute_microphone">Mute microphone</string>
+    <string name="unmute_microphone">Unmute microphone</string>
+    <string name="status_microphone_muted">Microphone muted — device playback still shared</string>
+    <string name="status_microphone_unmuted">Microphone active in stream (device playback paused)</string>
+    <string name="playback_capture_test_title">Playback capture test</string>
+    <string name="open_playback_capture_test">Samsung playback capture test</string>
+    <string name="play_test_tone_while_sharing">Play test tone (while sharing)</string>
 </resources>

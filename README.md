@@ -87,6 +87,13 @@ Open `http://localhost:3000`, set **WebSocket URL** to your PC’s LAN IP, e.g. 
 - OEM-specific restrictions on internal audio capture may apply.
 - Foreground service + media projection required while sharing.
 
+## Samsung / playback capture diagnostic
+
+From the main screen (while not sharing), open **Samsung playback capture test**. This runs `PlaybackAudioCapture` only (no WebRTC) and shows a live **Peak** value:
+
+- **Peak > 0** — OS is delivering PCM; screen-share-while-muted can work on this device/strategy.
+- **Peak = 0** — REMOTE_SUBMIX is silent; try **Next capture strategy** (USAGE_MEDIA → USAGE_MEDIA+UIDs → ALL_USAGES) or **Play in-app test tone**, then compare with YouTube.
+
 ## Troubleshooting
 
 | Issue | Check |
@@ -95,6 +102,11 @@ Open `http://localhost:3000`, set **WebSocket URL** to your PC’s LAN IP, e.g. 
 | No audio | API 29+? Audio actually playing on device? Unmute browser video. |
 | Can’t connect signaling | Firewall, correct LAN IP, `usesCleartextTraffic` for `ws://` |
 | Emulator → host | Use `ws://10.0.2.2:8080` |
+
+- When using with phone connected through USB, allowing it to connect to 127.0.0.1:8080
+
+adb reverse tcp:8080 tcp:8080
+adb reverse --list
 
 ## License
 

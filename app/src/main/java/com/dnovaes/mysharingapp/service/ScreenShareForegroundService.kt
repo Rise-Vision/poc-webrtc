@@ -75,10 +75,6 @@ class ScreenShareForegroundService : Service() {
         private var isForegroundReady = false
 
         fun runWhenForeground(context: Context, block: () -> Unit) {
-            if (isForegroundReady) {
-                mainHandler.post(block)
-                return
-            }
             synchronized(pendingCallbacks) {
                 pendingCallbacks.add(block)
             }
@@ -86,6 +82,10 @@ class ScreenShareForegroundService : Service() {
                 context,
                 Intent(context, ScreenShareForegroundService::class.java),
             )
+        }
+
+        fun markForegroundEnded() {
+            isForegroundReady = false
         }
 
         private fun notifyForegroundReady() {

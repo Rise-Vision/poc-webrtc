@@ -32,12 +32,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.dnovaes.mysharingapp.service.ScreenShareForegroundService
@@ -65,6 +67,11 @@ class MainActivity : ComponentActivity() {
                         startSharing(wsUrl, room, resultCode, data)
                     },
                     onStopShare = { stopSharing() },
+                    onSetMicrophoneMuted = { muted -> publisher?.setMicrophoneMuted(muted) },
+                    onPlayTestTone = { publisher?.playDebugTestTone() },
+                    onOpenPlaybackTest = {
+                        startActivity(Intent(this, PlaybackCaptureTestActivity::class.java))
+                    },
                     isSharing = isSharingState.value,
                 )
             }
@@ -88,7 +95,7 @@ class MainActivity : ComponentActivity() {
             activeProjection = projection
 
             publisher = ScreenSharePublisher(
-                context = applicationContext,
+                context = this@MainActivity,
                 signalingClient = SignalingClient(),
                 onStatus = { message ->
                     runOnUiThread {
@@ -109,6 +116,7 @@ class MainActivity : ComponentActivity() {
         isSharingState.value = false
         activeProjection?.stop()
         activeProjection = null
+        ScreenShareForegroundService.markForegroundEnded()
         stopService(Intent(this, ScreenShareForegroundService::class.java))
     }
 }
@@ -125,6 +133,9 @@ private fun launchScreenCapture(
 private fun ScreenShareScreen(
     onStartShare: (wsUrl: String, room: String, resultCode: Int, data: Intent) -> Unit,
     onStopShare: () -> Unit,
+    onSetMicrophoneMuted: (microphoneMuted: Boolean) -> Unit,
+    onPlayTestTone: () -> Unit,
+    onOpenPlaybackTest: () -> Unit,
     isSharing: Boolean,
 ) {
     val context = LocalContext.current
@@ -134,6 +145,15 @@ private fun ScreenShareScreen(
     }
     var room by remember { mutableStateOf(prefs.getString("room", "poc") ?: "poc") }
     var status by remember { mutableStateOf("Idle") }
+    var isMicrophoneMuted by remember { mutableStateOf(true) }
+
+    LaunchedEffect(isSharing) {
+        if (isSharing) {
+            onSetMicrophoneMuted(true)
+        } else {
+            isMicrophoneMuted = true
+        }
+    }
 
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -204,6 +224,12 @@ private fun ScreenShareScreen(
 
             if (!isSharing) {
                 Button(
+                    onClick = onOpenPlaybackTest,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.open_playback_capture_test))
+                }
+                Button(
                     onClick = {
                         val missing = buildList {
                             if (ContextCompat.checkSelfPermission(
@@ -212,6 +238,14 @@ private fun ScreenShareScreen(
                                 ) != PackageManager.PERMISSION_GRANTED
                             ) {
                                 add(Manifest.permission.RECORD_AUDIO)
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT,
+                                ) != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                add(com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT)
                             }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                                 ContextCompat.checkSelfPermission(
@@ -233,6 +267,32 @@ private fun ScreenShareScreen(
                     Text("Start screen + audio share")
                 }
             } else {
+                Button(
+                    onClick = onPlayTestTone,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.play_test_tone_while_sharing))
+                }
+                Button(
+                    onClick = {
+                        isMicrophoneMuted = !isMicrophoneMuted
+                        onSetMicrophoneMuted(isMicrophoneMuted)
+                        status = if (isMicrophoneMuted) {
+                            context.getString(R.string.status_microphone_muted)
+                        } else {
+                            context.getString(R.string.status_microphone_unmuted)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        if (isMicrophoneMuted) {
+                            stringResource(R.string.unmute_microphone)
+                        } else {
+                            stringResource(R.string.mute_microphone)
+                        },
+                    )
+                }
                 Button(
                     onClick = {
                         onStopShare()
