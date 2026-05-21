@@ -213,6 +213,7 @@ class ScreenSharePublisher(
 
         peerConnection?.addTrack(videoTrack, listOf("stream"))
         peerConnection?.addTrack(shareAudioTrack!!, listOf("stream"))
+        applyPlaybackAudioEncoding()
         Log.d(TAG, "PeerConnection created, tracks added (video + audio)")
         if (peerReadyReceived) {
             Log.d(TAG, "peer-ready arrived early — creating offer now")
@@ -312,6 +313,7 @@ class ScreenSharePublisher(
                         object : SdpObserverAdapter() {
                             override fun onSetSuccess() {
                                 Log.d(TAG, "localDescription set (offer)")
+                                applyPlaybackAudioEncoding()
                                 signalingClient.sendOffer(description.description)
                                 onStatus("Offer sent — check browser viewer")
                             }
@@ -337,6 +339,22 @@ class ScreenSharePublisher(
         )
     }
 
+    /** Opus bitrate for device playback (stereo PCM → encoded stream). */
+    private fun applyPlaybackAudioEncoding() {
+        val pc = peerConnection ?: return
+        for (sender in pc.senders) {
+            if (sender.track()?.kind() != "audio") continue
+            val params = sender.parameters
+            if (params.encodings.isEmpty()) continue
+            for (encoding in params.encodings) {
+                encoding.maxBitrateBps = OPUS_MAX_BITRATE_BPS
+                encoding.minBitrateBps = OPUS_MIN_BITRATE_BPS
+            }
+            sender.parameters = params
+            Log.d(TAG, "Audio RTP encoding ${OPUS_MAX_BITRATE_BPS / 1000}kbps max")
+        }
+    }
+
     private fun rtcConfig(): PeerConnection.RTCConfiguration {
         return PeerConnection.RTCConfiguration(
             listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()),
@@ -360,5 +378,7 @@ class ScreenSharePublisher(
         private const val TAG = "ScreenSharePublisher"
         private const val VIDEO_TRACK_ID = "screen_video"
         private const val AUDIO_TRACK_ID = "share_audio"
+        private const val OPUS_MAX_BITRATE_BPS = 128_000
+        private const val OPUS_MIN_BITRATE_BPS = 64_000
     }
 }

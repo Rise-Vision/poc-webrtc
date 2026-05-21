@@ -1,6 +1,7 @@
 package com.dnovaes.mysharingapp.webrtc
 
 import android.media.AudioRecord
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
@@ -11,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /**
- * Feeds WebRTC from mic or playback [AudioRecord].
+ * Feeds WebRTC from mic or playback [AudioRecord] with steady 10 ms frames.
  */
 internal class WebRtcPaddedCaptureLoop(
     private val webRtcAudioRecord: Any,
@@ -22,13 +23,24 @@ internal class WebRtcPaddedCaptureLoop(
 
     private val running = AtomicBoolean(true)
     private val scratch: ByteArray
+    private val assembler: PcmFrameAssembler
+    private val frameDurationNs: Long
     private var silentPlaybackStreak = 0
     private var lastUsePlayback: Boolean? = null
     private var silentMicStreak = 0
+    private var nextFrameDeadlineNs = 0L
 
     init {
         val cap = WebRtcNativeAudioBridge.getCaptureByteBuffer(webRtcAudioRecord)?.capacity() ?: 0
-        scratch = ByteArray(cap)
+        scratch = ByteArray(cap.coerceAtLeast(1))
+        assembler = PcmFrameAssembler(cap.coerceAtLeast(1))
+        val sampleRate = micAudioRecord.sampleRate.coerceAtLeast(1)
+        val channels = micAudioRecord.channelCount.coerceAtLeast(1)
+        frameDurationNs = 1_000_000_000L * PlaybackAudioConfig.WEBRTC_FRAME_MS / 1000
+        Log.d(
+            TAG,
+            "Loop frameBytes=$cap sampleRate=$sampleRate ch=$channels frameNs=$frameDurationNs",
+        )
     }
 
     fun stop() {
@@ -51,6 +63,8 @@ internal class WebRtcPaddedCaptureLoop(
             val usePlayback = microphoneMuted && playbackCapture != null
             if (lastUsePlayback != usePlayback) {
                 lastUsePlayback = usePlayback
+                assembler.reset()
+                nextFrameDeadlineNs = 0L
                 Log.i(TAG, "Capture source → ${if (usePlayback) "playback" else "mic"}")
             }
 
@@ -64,82 +78,52 @@ internal class WebRtcPaddedCaptureLoop(
                 null
             }
             if (record == null) {
-                Thread.sleep(FRAME_SLEEP_MS)
+                Thread.sleep(IDLE_SLEEP_MS)
                 continue
             }
 
-            val bytesRead = try {
-                record.read(scratch, 0, capacity)
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "read failed", e)
-                -1
-            }
-
+            val bytesRead = readAudio(record, scratch, capacity)
             if (bytesRead <= 0) {
-                Thread.sleep(FRAME_SLEEP_MS)
+                Thread.sleep(IDLE_SLEEP_MS)
                 continue
             }
 
-            val frameBytes = if (bytesRead < capacity) {
-                padScratchToCapacity(bytesRead, capacity)
-                capacity
-            } else {
-                bytesRead
-            }
+            var framesThisRead = 0
+            var nativeGone = false
+            assembler.append(scratch, 0, bytesRead) { frame ->
+                if (WebRtcNativeAudioBridge.getNativeAudioRecordPointer(webRtcAudioRecord) == 0L) {
+                    nativeGone = true
+                    return@append
+                }
+                val peak = peakPcm16(frame, frame.size)
+                logLevels(usePlayback, peak)
 
-            byteBuffer.clear()
-            byteBuffer.put(scratch, 0, frameBytes)
+                byteBuffer.clear()
+                byteBuffer.put(frame)
 
-            val peak = peakPcm16(scratch, frameBytes)
-            if (usePlayback) {
-                WebRtcAudioInjector.notifyCapturePeak(peak)
-                if (peak == 0) {
-                    silentPlaybackStreak++
-                    if (silentPlaybackStreak == 300) {
-                        Log.w(TAG, "Playback PCM silent — use Play test tone (YouTube often not capturable)")
+                if (WebRtcNativeAudioBridge.feedPcmFrame(webRtcAudioRecord, frame.size)) {
+                    framesSent++
+                    framesThisRead++
+                    if (framesSent - lastLogFrame >= 100) {
+                        lastLogFrame = framesSent
+                        Log.d(
+                            TAG,
+                            "sent $framesSent frames source=${if (usePlayback) "playback" else "mic"} " +
+                                "peak=$peak bytesRead=$bytesRead ch=${record.channelCount}",
+                        )
                     }
+                    paceFrame()
                 } else {
-                    if (silentPlaybackStreak > 0) {
-                        Log.i(TAG, "Playback PCM active peak=$peak")
-                    }
-                    silentPlaybackStreak = 0
-                }
-            } else {
-                if (peak == 0) {
-                    silentMicStreak++
-                    if (silentMicStreak == 100) {
-                        Log.w(TAG, "Mic PCM silent — check RECORD_AUDIO / speak louder")
-                        restartMicIfNeeded(micAudioRecord)
-                    }
-                } else {
-                    if (silentMicStreak > 0) {
-                        Log.i(TAG, "Mic PCM active peak=$peak")
-                    }
-                    silentMicStreak = 0
+                    Log.e(TAG, "native feed failed — stopping loop")
+                    running.set(false)
                 }
             }
 
-            if (WebRtcNativeAudioBridge.getNativeAudioRecordPointer(webRtcAudioRecord) == 0L) {
-                Log.d(TAG, "Native audio record gone — exiting loop")
-                break
-            }
+            if (nativeGone || !running.get()) break
 
-            if (WebRtcNativeAudioBridge.feedPcmFrame(webRtcAudioRecord, frameBytes)) {
-                framesSent++
-                if (framesSent - lastLogFrame >= 100) {
-                    lastLogFrame = framesSent
-                    Log.d(
-                        TAG,
-                        "sent $framesSent frames source=${if (usePlayback) "playback" else "mic"} " +
-                            "peak=$peak bytesRead=$bytesRead ch=${record.channelCount}",
-                    )
-                }
-            } else {
-                Log.e(TAG, "native feed failed — stopping loop")
-                break
+            if (framesThisRead == 0) {
+                Thread.sleep(IDLE_SLEEP_MS)
             }
-
-            Thread.sleep(FRAME_SLEEP_MS)
         }
 
         if (activeLoop === this) {
@@ -148,9 +132,66 @@ internal class WebRtcPaddedCaptureLoop(
         Log.d(TAG, "Loop stopped sent=$framesSent")
     }
 
-    private fun padScratchToCapacity(bytesRead: Int, capacity: Int) {
-        for (i in bytesRead until capacity) {
-            scratch[i] = 0
+    private fun readAudio(record: AudioRecord, buffer: ByteArray, size: Int): Int {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                record.read(buffer, 0, size, AudioRecord.READ_BLOCKING)
+            } else {
+                record.read(buffer, 0, size)
+            }
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "read failed", e)
+            -1
+        }
+    }
+
+    private fun paceFrame() {
+        val now = System.nanoTime()
+        if (nextFrameDeadlineNs == 0L) {
+            nextFrameDeadlineNs = now
+        }
+        nextFrameDeadlineNs += frameDurationNs
+        val sleepNs = nextFrameDeadlineNs - System.nanoTime()
+        if (sleepNs > 500_000L) {
+            val ms = sleepNs / 1_000_000L
+            val ns = (sleepNs % 1_000_000L).toInt()
+            try {
+                Thread.sleep(ms, ns)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        } else if (sleepNs < -frameDurationNs * 2) {
+            nextFrameDeadlineNs = System.nanoTime()
+        }
+    }
+
+    private fun logLevels(usePlayback: Boolean, peak: Int) {
+        if (usePlayback) {
+            WebRtcAudioInjector.notifyCapturePeak(peak)
+            if (peak == 0) {
+                silentPlaybackStreak++
+                if (silentPlaybackStreak == 300) {
+                    Log.w(TAG, "Playback PCM silent — use Play test tone (YouTube often not capturable)")
+                }
+            } else {
+                if (silentPlaybackStreak > 0) {
+                    Log.i(TAG, "Playback PCM active peak=$peak")
+                }
+                silentPlaybackStreak = 0
+            }
+        } else {
+            if (peak == 0) {
+                silentMicStreak++
+                if (silentMicStreak == 100) {
+                    Log.w(TAG, "Mic PCM silent — check RECORD_AUDIO / speak louder")
+                    restartMicIfNeeded(micAudioRecord)
+                }
+            } else {
+                if (silentMicStreak > 0) {
+                    Log.i(TAG, "Mic PCM active peak=$peak")
+                }
+                silentMicStreak = 0
+            }
         }
     }
 
@@ -188,7 +229,7 @@ internal class WebRtcPaddedCaptureLoop(
 
     companion object {
         private const val TAG = "WebRtcPaddedCapture"
-        private const val FRAME_SLEEP_MS = 10L
+        private const val IDLE_SLEEP_MS = 2L
         private const val HANDOFF_RETRY_MS = 250L
         private const val HANDOFF_MAX_ATTEMPTS = 12
 

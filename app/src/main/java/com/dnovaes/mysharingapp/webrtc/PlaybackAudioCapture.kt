@@ -314,21 +314,32 @@ class PlaybackAudioCapture(
 
     private fun buildAudioRecord(
         sampleRate: Int,
-        bufferSizeBytes: Int,
+        webRtcFrameBytes: Int,
         strategy: CaptureStrategy,
     ): AudioRecord? {
         val channelMask = AudioFormat.CHANNEL_IN_STEREO
         val encoding = AudioFormat.ENCODING_PCM_16BIT
         val minBuffer = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
-        if (minBuffer <= 0) return null
-        val bufferBytes = maxOf(minBuffer * 4, bufferSizeBytes * 2, minBuffer)
+        if (minBuffer <= 0) {
+            lastBuildError = "getMinBufferSize failed for ${sampleRate}Hz"
+            return null
+        }
+        val bufferBytes = PlaybackAudioConfig.captureBufferBytes(sampleRate, webRtcFrameBytes)
         val format = AudioFormat.Builder()
             .setEncoding(encoding)
             .setSampleRate(sampleRate)
             .setChannelMask(channelMask)
             .build()
 
-        return buildPlaybackCaptureRecord(format, bufferBytes, strategy)
+        val record = buildPlaybackCaptureRecord(format, bufferBytes, strategy) ?: return null
+        if (record.sampleRate != sampleRate) {
+            Log.w(
+                TAG,
+                "Playback capture rate ${record.sampleRate}Hz != requested ${sampleRate}Hz " +
+                    "(WebRTC frame=${webRtcFrameBytes}B)",
+            )
+        }
+        return record
     }
 
     private fun buildPlaybackCaptureRecord(

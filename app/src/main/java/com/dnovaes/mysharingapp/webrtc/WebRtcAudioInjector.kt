@@ -66,7 +66,17 @@ object WebRtcAudioInjector {
         audioDeviceModule.setMicrophoneMute(false)
         WebRtcNativeAudioBridge.setMicrophoneMuteField(webRtcAudioRecord, false)
 
-        playbackCapture?.configure(captureSampleRate, captureChannelCount, captureBufferBytes)
+        val playbackRate = appContext?.let { ctx ->
+            PlaybackAudioConfig.preferredSampleRateHz(ctx, captureSampleRate)
+        } ?: captureSampleRate
+        playbackCapture?.configure(playbackRate, captureChannelCount, captureBufferBytes)
+        if (playbackRate != captureSampleRate) {
+            Log.w(
+                TAG,
+                "Playback capture @ ${playbackRate}Hz, WebRTC mic buffer @ ${captureSampleRate}Hz " +
+                    "(frame=${captureBufferBytes}B) — rates should match for best quality",
+            )
+        }
         playbackCapture?.setOnPlaybackActiveListener {
             if (!muteState.microphoneMuted.get() || !usingPaddedLoop) return@setOnPlaybackActiveListener
             Log.d(
