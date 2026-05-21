@@ -37,13 +37,57 @@ sequenceDiagram
 
 ### 1. Start signaling server (on your computer)
 
+The phone and browser connect **to your Mac/PC** over the LAN. The Node process must be running **and** allowed to accept **incoming** TCP connections on port **8080** (WebSocket signaling).
+
 ```bash
 cd signaling-server
 npm install
 npm start
 ```
 
-Server listens on `ws://0.0.0.0:8080`.
+You should see: `Signaling server listening on ws://0.0.0.0:8080`.
+
+Find your Mac’s LAN IP (Wi‑Fi example):
+
+```bash
+ipconfig getifaddr en0
+```
+
+Use that in the app and browser, e.g. `ws://192.168.1.42:8080` — not `localhost`, when using a physical phone.
+
+#### Allow incoming connections on macOS
+
+macOS **Firewall** can block the Node server so the phone never reaches port 8080.
+
+1. **System Settings** → **Network** → **Firewall** (or **Privacy & Security** → **Firewall** on older macOS).
+2. Turn **Firewall** on if you use it; click **Options…** (or **Firewall Options**).
+3. Ensure **Node** is allowed to receive incoming connections:
+   - If you see **Node**, **node**, or **Terminal** in the list, set it to **Allow incoming connections**.
+   - If nothing appears yet, start the server (`npm start`) and connect once from the phone or browser — macOS may show a prompt; choose **Allow**.
+4. To add manually: **Options** → **+** → add `/usr/local/bin/node` or the path from `which node`, then allow incoming.
+5. **Same Wi‑Fi**: Phone and Mac must be on the same network (guest Wi‑Fi often blocks device-to-device traffic).
+
+**Check that the port is listening** (server running):
+
+```bash
+lsof -iTCP:8080 -sTCP:LISTEN
+```
+
+**Check from the phone’s perspective** (replace with your Mac IP):
+
+```bash
+curl -v http://192.168.1.42:8080/
+```
+
+You should get `POC screen-share signaling server`. If this fails from another machine on the LAN, the firewall or network is still blocking port 8080.
+
+**USB debugging only** (no LAN): forward the port instead of opening the firewall:
+
+```bash
+adb reverse tcp:8080 tcp:8080
+```
+
+Then use `ws://127.0.0.1:8080` on the phone and `ws://127.0.0.1:8080` in the browser on the Mac.
 
 ### 2. Open the web viewer
 
@@ -100,13 +144,9 @@ From the main screen (while not sharing), open **Samsung playback capture test**
 |-------|--------|
 | No video in browser | Viewer connected before publisher? Same room ID? |
 | No audio | API 29+? Audio actually playing on device? Unmute browser video. |
-| Can’t connect signaling | Firewall, correct LAN IP, `usesCleartextTraffic` for `ws://` |
+| Can’t connect signaling | Node server running? macOS firewall allows **incoming** on port 8080? Correct LAN IP (not `localhost` on phone)? `usesCleartextTraffic` for `ws://` |
 | Emulator → host | Use `ws://10.0.2.2:8080` |
-
-- When using with phone connected through USB, allowing it to connect to 127.0.0.1:8080
-
-adb reverse tcp:8080 tcp:8080
-adb reverse --list
+| USB → host, no LAN | `adb reverse tcp:8080 tcp:8080` then `ws://127.0.0.1:8080` on the phone |
 
 ## License
 
