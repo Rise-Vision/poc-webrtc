@@ -100,7 +100,7 @@ class ScreenSharePublisher(
         if (microphoneMuted) {
             onStatus("Mic muted — device playback (use Play test tone to verify)")
         } else {
-            onStatus("Mic live — speak into the phone")
+            onStatus("Mic live — voice only (use headset or pause media on the phone)")
         }
     }
 
@@ -228,11 +228,7 @@ class ScreenSharePublisher(
             onStatus("API < 29: system audio capture not supported")
         }
 
-        val builder = JavaAudioDeviceModule.builder(context)
-            .setUseStereoInput(true)
-            .setUseStereoOutput(true)
-            .setUseHardwareNoiseSuppressor(false)
-            .setUseHardwareAcousticEchoCanceler(false)
+        val builder = MicAudioConfig.applyTo(JavaAudioDeviceModule.builder(context))
             .setAudioRecordStateCallback(
                 object : JavaAudioDeviceModule.AudioRecordStateCallback {
                     override fun onWebRtcAudioRecordStart() {

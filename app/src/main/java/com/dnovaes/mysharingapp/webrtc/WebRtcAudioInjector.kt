@@ -19,6 +19,7 @@ object WebRtcAudioInjector {
 
     private const val TAG = "WebRtcAudioInjector"
     private const val WEBRTC_AUDIO_RECORD_CLASS = "org.webrtc.audio.WebRtcAudioRecord"
+    private const val MIC_ROUTING_SETTLE_MS = 100L
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -30,6 +31,7 @@ object WebRtcAudioInjector {
     private var captureBufferBytes = 0
     private var appContext: Context? = null
     private var lastNonZeroPeakAtMs = 0L
+    private var pendingMicStart: Runnable? = null
 
     fun notifyCapturePeak(peak: Int) {
         if (peak > 0) {
@@ -62,6 +64,7 @@ object WebRtcAudioInjector {
         captureSampleRate = micRecord.sampleRate
         captureChannelCount = micRecord.channelCount
         captureBufferBytes = getByteBufferCapacity(webRtcAudioRecord)
+        MicAudioConfig.logMicRecord(micRecord, captureBufferBytes)
 
         audioDeviceModule.setMicrophoneMute(false)
         WebRtcNativeAudioBridge.setMicrophoneMuteField(webRtcAudioRecord, false)
@@ -125,9 +128,10 @@ object WebRtcAudioInjector {
 
         val mic = micAudioRecord ?: return
         if (microphoneMuted) {
+            cancelPendingMicStart()
             switchToPlaybackPipeline(mic, playbackCapture)
         } else {
-            switchToMicPipeline(mic, playbackCapture)
+            switchToMicPipeline(mic, playbackCapture, microphoneMuteState)
         }
         Log.d(TAG, "Pipeline → ${if (microphoneMuted) "playback" else "microphone"}")
     }
@@ -140,6 +144,7 @@ object WebRtcAudioInjector {
     }
 
     fun clear(context: Context? = appContext) {
+        cancelPendingMicStart()
         WebRtcPaddedCaptureLoop.cancelPendingHandoff()
         paddedLoop = null
         usingPaddedLoop = false
@@ -161,16 +166,38 @@ object WebRtcAudioInjector {
         }
     }
 
-    private fun switchToMicPipeline(mic: AudioRecord, playbackCapture: PlaybackAudioCapture?) {
+    private fun switchToMicPipeline(
+        mic: AudioRecord,
+        playbackCapture: PlaybackAudioCapture?,
+        microphoneMuteState: MicrophoneMuteState,
+    ) {
         playbackCapture?.releaseCaptureBlocking()
+        Log.d(TAG, "Playback capture released — mic-only PCM (no REMOTE_SUBMIX)")
         appContext?.let { AudioCaptureRouting.enterMicrophoneCaptureMode(it, switchingFromPlayback = true) }
-        stopRecordingQuietly(mic)
-        val ok = startRecordingQuietly(mic)
-        Log.d(
-            TAG,
-            "Mic pipeline active startRecording=$ok state=${mic.recordingState} " +
-                "rate=${mic.sampleRate} ch=${mic.channelCount}",
-        )
+        cancelPendingMicStart()
+        val startMic = Runnable {
+            pendingMicStart = null
+            if (microphoneMuteState.microphoneMuted.get()) return@Runnable
+            if (playbackCapture?.recordForRead != null) {
+                Log.w(TAG, "Playback AudioRecord still active while unmuted — releasing again")
+                playbackCapture.releaseCaptureBlocking()
+            }
+            stopRecordingQuietly(mic)
+            val ok = startRecordingQuietly(mic)
+            Log.d(
+                TAG,
+                "Mic-only pipeline startRecording=$ok rate=${mic.sampleRate} ch=${mic.channelCount}",
+            )
+        }
+        pendingMicStart = startMic
+        runOnMain {
+            mainHandler.postDelayed(startMic, MIC_ROUTING_SETTLE_MS)
+        }
+    }
+
+    private fun cancelPendingMicStart() {
+        pendingMicStart?.let { mainHandler.removeCallbacks(it) }
+        pendingMicStart = null
     }
 
     internal fun activatePipelineForHandoff(

@@ -29,6 +29,7 @@ internal class WebRtcPaddedCaptureLoop(
     private var lastUsePlayback: Boolean? = null
     private var silentMicStreak = 0
     private var nextFrameDeadlineNs = 0L
+    private var lastMicRestartElapsedMs = 0L
 
     init {
         val cap = WebRtcNativeAudioBridge.getCaptureByteBuffer(webRtcAudioRecord)?.capacity() ?: 0
@@ -37,6 +38,9 @@ internal class WebRtcPaddedCaptureLoop(
         val sampleRate = micAudioRecord.sampleRate.coerceAtLeast(1)
         val channels = micAudioRecord.channelCount.coerceAtLeast(1)
         frameDurationNs = 1_000_000_000L * PlaybackAudioConfig.WEBRTC_FRAME_MS / 1000
+        if (channels == 1 && cap > PlaybackAudioConfig.frameBytesForRate(sampleRate, 1) * 2) {
+            Log.w(TAG, "Mic is mono but WebRTC buffer is ${cap}B — enable stereo input on ADM")
+        }
         Log.d(
             TAG,
             "Loop frameBytes=$cap sampleRate=$sampleRate ch=$channels frameNs=$frameDurationNs",
@@ -76,6 +80,10 @@ internal class WebRtcPaddedCaptureLoop(
                 micAudioRecord
             } else {
                 null
+            }
+            if (!usePlayback && !microphoneMuted && record !== micAudioRecord) {
+                Thread.sleep(IDLE_SLEEP_MS)
+                continue
             }
             if (record == null) {
                 Thread.sleep(IDLE_SLEEP_MS)
@@ -182,7 +190,7 @@ internal class WebRtcPaddedCaptureLoop(
         } else {
             if (peak == 0) {
                 silentMicStreak++
-                if (silentMicStreak == 100) {
+                if (silentMicStreak == 150) {
                     Log.w(TAG, "Mic PCM silent — check RECORD_AUDIO / speak louder")
                     restartMicIfNeeded(micAudioRecord)
                 }
@@ -216,6 +224,9 @@ internal class WebRtcPaddedCaptureLoop(
     }
 
     private fun restartMicIfNeeded(mic: AudioRecord) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastMicRestartElapsedMs < MIC_RESTART_COOLDOWN_MS) return
+        lastMicRestartElapsedMs = now
         try {
             if (mic.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                 mic.stop()
@@ -230,6 +241,7 @@ internal class WebRtcPaddedCaptureLoop(
     companion object {
         private const val TAG = "WebRtcPaddedCapture"
         private const val IDLE_SLEEP_MS = 2L
+        private const val MIC_RESTART_COOLDOWN_MS = 5_000L
         private const val HANDOFF_RETRY_MS = 250L
         private const val HANDOFF_MAX_ATTEMPTS = 12
 
