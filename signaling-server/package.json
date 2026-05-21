@@ -1,0 +1,13 @@
+{
+  "name": "poc-screen-share-signaling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket signaling for Android screen share POC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

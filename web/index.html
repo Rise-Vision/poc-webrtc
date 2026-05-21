@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Android Screen Share Viewer</title>
+  <style>
+    :root {
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #e8e8e8;
+      background: #111;
+    }
+    body {
+      margin: 0;
+      padding: 1.5rem;
+      max-width: 960px;
+    }
+    h1 { font-size: 1.25rem; margin-top: 0; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    input, button {
+      font: inherit;
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #222;
+      color: inherit;
+    }
+    button { cursor: pointer; background: #2d6cdf; border-color: #2d6cdf; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #log {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 0.75rem;
+      min-height: 4rem;
+      white-space: pre-wrap;
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+    }
+    video {
+      width: 100%;
+      max-height: 70vh;
+      background: #000;
+      border-radius: 8px;
+    }
+    .hint { color: #aaa; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Android screen share (video + audio)</h1>
+  <p class="hint">
+    Start the signaling server, open this page on your computer, connect as viewer,
+    then start sharing from the Android app on the same room ID.
+  </p>
+
+  <div class="row">
+    <input id="wsUrl" size="40" placeholder="ws://192.168.1.10:8080" />
+    <input id="roomId" size="12" value="poc" placeholder="room" />
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+
+  <pre id="log">Disconnected.</pre>
+  <video id="remoteVideo" autoplay playsinline controls></video>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const videoEl = document.getElementById("remoteVideo");
+    const wsUrlInput = document.getElementById("wsUrl");
+    const roomInput = document.getElementById("roomId");
+    const connectBtn = document.getElementById("connectBtn");
+    const disconnectBtn = document.getElementById("disconnectBtn");
+
+    wsUrlInput.value =
+      localStorage.getItem("pocWsUrl") ||
+      `ws://${location.hostname || "localhost"}:8080`;
+
+    let ws = null;
+    let pc = null;
+
+    function log(message) {
+      logEl.textContent = `${new Date().toLocaleTimeString()}  ${message}\n` + logEl.textContent;
+    }
+
+    function setConnected(connected) {
+      connectBtn.disabled = connected;
+      disconnectBtn.disabled = !connected;
+      roomInput.disabled = connected;
+      wsUrlInput.disabled = connected;
+    }
+
+    async function ensurePeerConnection() {
+      if (pc) return pc;
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+
+      pc.ontrack = (event) => {
+        log(`Remote track: ${event.track.kind}`);
+        if (!videoEl.srcObject) {
+          videoEl.srcObject = event.streams[0];
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (!event.candidate || !ws) return;
+        ws.send(
+          JSON.stringify({
+            type: "ice",
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+          })
+        );
+      };
+
+      pc.onconnectionstatechange = () => log(`Connection: ${pc.connectionState}`);
+      return pc;
+    }
+
+    async function handleOffer(sdp) {
+      const peer = await ensurePeerConnection();
+      await peer.setRemoteDescription({ type: "offer", sdp });
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+      log("Sent answer");
+    }
+
+    async function handleIce(message) {
+      if (!pc) return;
+      try {
+        await pc.addIceCandidate({
+          candidate: message.candidate,
+          sdpMid: message.sdpMid,
+          sdpMLineIndex: message.sdpMLineIndex,
+        });
+      } catch (err) {
+        log(`ICE error: ${err.message}`);
+      }
+    }
+
+    function connect() {
+      const url = wsUrlInput.value.trim();
+      const room = roomInput.value.trim() || "poc";
+      localStorage.setItem("pocWsUrl", url);
+
+      ws = new WebSocket(url);
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: "join", room, role: "viewer" }));
+        log(`Connected to ${url} (room: ${room})`);
+        setConnected(true);
+      };
+
+      ws.onmessage = async (event) => {
+        const message = JSON.parse(event.data);
+        switch (message.type) {
+          case "joined":
+            log(`Joined as ${message.role}`);
+            break;
+          case "peer-ready":
+            log("Publisher is ready — waiting for offer…");
+            break;
+          case "offer":
+            log("Received offer");
+            await handleOffer(message.sdp);
+            break;
+          case "ice":
+            await handleIce(message);
+            break;
+          case "error":
+            log(`Error: ${message.message}`);
+            break;
+          default:
+            log(`Unknown: ${message.type}`);
+        }
+      };
+
+      ws.onclose = () => {
+        log("WebSocket closed");
+        disconnect();
+      };
+
+      ws.onerror = () => log("WebSocket error");
+    }
+
+    function disconnect() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      videoEl.srcObject = null;
+      setConnected(false);
+    }
+
+    connectBtn.onclick = connect;
+    disconnectBtn.onclick = disconnect;
+  </script>
+</body>
+</html>
