@@ -87,13 +87,14 @@ class MainActivity : ComponentActivity() {
         if (publisher != null) return
         Log.d(TAG, "startSharing wsUrl=$wsUrl room=$room")
 
-        ScreenShareForegroundService.runWhenForeground(this) {
-            val projectionManager =
-                getSystemService(MediaProjectionManager::class.java)
-            val projection = projectionManager.getMediaProjection(resultCode, data)
-                ?: return@runWhenForeground
+        ScreenShareForegroundService.runWhenForeground(
+            context = this,
+            resultCode = resultCode,
+            resultData = data,
+            onProjectionStopped = { runOnUiThread { stopSharing() } },
+        ) { projection ->
+            if (publisher != null) return@runWhenForeground
             activeProjection = projection
-
             publisher = ScreenSharePublisher(
                 context = this@MainActivity,
                 signalingClient = SignalingClient(),
@@ -103,7 +104,7 @@ class MainActivity : ComponentActivity() {
                     }
                 },
             ).also {
-                it.start(resultCode, data, projection, wsUrl, room)
+                it.start(projection, wsUrl, room)
             }
             isSharingState.value = true
         }
@@ -114,7 +115,6 @@ class MainActivity : ComponentActivity() {
         publisher?.stop()
         publisher = null
         isSharingState.value = false
-        activeProjection?.stop()
         activeProjection = null
         ScreenShareForegroundService.markForegroundEnded()
         stopService(Intent(this, ScreenShareForegroundService::class.java))

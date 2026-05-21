@@ -22,7 +22,6 @@ import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
-import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
@@ -39,7 +38,7 @@ class ScreenSharePublisher(
     private val eglBase = EglBase.create()
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
-    private var videoCapturer: ScreenCapturerAndroid? = null
+    private var videoCapturer: ExistingProjectionCapturer? = null
     private var videoSource: VideoSource? = null
     private var javaAudioDeviceModule: JavaAudioDeviceModule? = null
     private var playbackAudioCapture: PlaybackAudioCapture? = null
@@ -65,8 +64,6 @@ class ScreenSharePublisher(
     }
 
     fun start(
-        resultCode: Int,
-        resultData: Intent,
         mediaProjection: MediaProjection,
         wsUrl: String,
         room: String,
@@ -75,18 +72,9 @@ class ScreenSharePublisher(
         // stop() cancels scope; recreate so observeSignaling() actually collects events.
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         this.mediaProjection = mediaProjection
-        mediaProjection.registerCallback(
-            object : MediaProjection.Callback() {
-                override fun onStop() {
-                    onStatus("Media projection ended")
-                    stop()
-                }
-            },
-            android.os.Handler(android.os.Looper.getMainLooper()),
-        )
         Log.d(TAG, "start wsUrl=$wsUrl room=$room")
         // WebRTC must be ready before signaling: peer-ready can arrive immediately on connect.
-        initWebRtc(resultCode, resultData, mediaProjection)
+        initWebRtc(mediaProjection)
         observeSignaling()
         signalingClient.connect(wsUrl, room, role = "publisher")
         onStatus("Connected to signaling. Waiting for browser viewer…")
@@ -148,11 +136,7 @@ class ScreenSharePublisher(
         onStatus("Stopped")
     }
 
-    private fun initWebRtc(
-        resultCode: Int,
-        resultData: Intent,
-        projection: MediaProjection,
-    ) {
+    private fun initWebRtc(projection: MediaProjection) {
         val initOptions = PeerConnectionFactory.InitializationOptions.builder(context)
             .setEnableInternalTracer(false)
             .createInitializationOptions()
@@ -175,12 +159,7 @@ class ScreenSharePublisher(
 
         val factory = peerConnectionFactory ?: return
 
-        videoCapturer = ScreenCapturerAndroid(resultData, object : MediaProjection.Callback() {
-            override fun onStop() {
-                onStatus("Screen capture ended by system")
-                stop()
-            }
-        })
+        videoCapturer = ExistingProjectionCapturer(projection)
         val surfaceHelper = SurfaceTextureHelper.create("ScreenCaptureThread", eglBase.eglBaseContext)
         videoSource = factory.createVideoSource(videoCapturer!!.isScreencast)
         videoCapturer!!.initialize(surfaceHelper, context, videoSource!!.capturerObserver)

@@ -79,8 +79,13 @@ class PlaybackCaptureTestActivity : ComponentActivity() {
         }
         val resultCode = result.resultCode
         val data = result.data!!
-        ScreenShareForegroundService.runWhenForeground(this) {
-            startTest(resultCode, data)
+        ScreenShareForegroundService.runWhenForeground(
+            context = this,
+            resultCode = resultCode,
+            resultData = data,
+            onProjectionStopped = { runOnUiThread { stopTest() } },
+        ) { obtained ->
+            startTestWithProjection(obtained)
         }
     }
 
@@ -147,14 +152,8 @@ class PlaybackCaptureTestActivity : ComponentActivity() {
         )
     }
 
-    private fun startTest(resultCode: Int, data: Intent) {
-        // Do not stop the foreground service here — getMediaProjection() requires it.
+    private fun startTestWithProjection(mp: MediaProjection) {
         stopCaptureOnly()
-        val mp = getSystemService(MediaProjectionManager::class.java).getMediaProjection(resultCode, data)
-        if (mp == null) {
-            appendLog("getMediaProjection failed")
-            return
-        }
         projection = mp
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             appendLog("Requires API 29+")
