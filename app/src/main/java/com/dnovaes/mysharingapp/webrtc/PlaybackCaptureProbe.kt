@@ -19,6 +19,8 @@ data class PlaybackCaptureProbeResult(
     val manufacturer: String = Build.MANUFACTURER,
     val model: String = Build.MODEL,
     val sdkInt: Int = Build.VERSION.SDK_INT,
+    /** When true, the dialog offers Try again / App settings to grant runtime permissions. */
+    val needsPermissionGrant: Boolean = false,
 )
 
 object PlaybackCaptureProbe {

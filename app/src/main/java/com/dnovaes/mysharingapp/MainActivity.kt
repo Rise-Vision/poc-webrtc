@@ -7,8 +7,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -47,9 +49,9 @@ import androidx.core.content.ContextCompat
 import com.dnovaes.mysharingapp.service.ScreenShareForegroundService
 import com.dnovaes.mysharingapp.signaling.SignalingClient
 import com.dnovaes.mysharingapp.ui.theme.POCSharingVideoAudioTheme
-import com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture
 import com.dnovaes.mysharingapp.webrtc.PlaybackCaptureProbe
 import com.dnovaes.mysharingapp.webrtc.PlaybackCaptureProbeResult
+import com.dnovaes.mysharingapp.webrtc.ProbePermissionHelper
 import com.dnovaes.mysharingapp.webrtc.ScreenSharePublisher
 
 class MainActivity : ComponentActivity() {
@@ -63,21 +65,27 @@ class MainActivity : ComponentActivity() {
     private var isSharingState = mutableStateOf(false)
     private var probeRunningState = mutableStateOf(false)
     private var probeDialogResultState = mutableStateOf<PlaybackCaptureProbeResult?>(null)
+    private var pendingProbePermissionRequest = emptyArray<String>()
 
     private val probePermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        if (results.values.all { it }) {
+        val evaluation = ProbePermissionHelper.evaluateGrantResults(
+            pendingProbePermissionRequest,
+            results,
+        )
+        Log.d(TAG, "probe permissions denied=${evaluation.deniedPermissions}")
+        if (evaluation.allGranted) {
             launchProbeProjection()
         } else {
             finishProbeWithResult(
                 PlaybackCaptureProbeResult(
                     works = false,
-                    summary = "Permissions denied",
-                    details = "Microphone and (on Android 14+) CAPTURE_MEDIA_OUTPUT are required " +
-                        "for the playback capture check.",
+                    summary = getString(R.string.probe_permissions_required),
+                    details = ProbePermissionHelper.buildDeniedMessage(evaluation.deniedLabels),
                     peak = 0,
                     strategy = null,
+                    needsPermissionGrant = true,
                 ),
             )
         }
@@ -138,6 +146,7 @@ class MainActivity : ComponentActivity() {
                         startActivity(Intent(this, PlaybackCaptureTestActivity::class.java))
                     },
                     onCheckPlaybackCapture = { startPlaybackCaptureProbe() },
+                    onOpenAppSettings = { openAppSettings() },
                     isSharing = isSharingState.value,
                     probeRunning = probeRunningState.value,
                     probeResult = probeDialogResultState.value,
@@ -201,34 +210,21 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val missing = buildList {
-            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                add(Manifest.permission.RECORD_AUDIO)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-                ContextCompat.checkSelfPermission(
-                    this@MainActivity,
-                    PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT,
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                add(PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                ContextCompat.checkSelfPermission(
-                    this@MainActivity,
-                    Manifest.permission.POST_NOTIFICATIONS,
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
+        val missing = ProbePermissionHelper.missingRuntimePermissions(this)
         if (missing.isEmpty()) {
             launchProbeProjection()
         } else {
-            probePermissionsLauncher.launch(missing.toTypedArray())
+            pendingProbePermissionRequest = missing.toTypedArray()
+            probePermissionsLauncher.launch(pendingProbePermissionRequest)
         }
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", packageName, null)
+            },
+        )
     }
 
     private fun launchProbeProjection() {
@@ -259,6 +255,7 @@ private fun ScreenShareScreen(
     onPlayTestTone: () -> Unit,
     onOpenPlaybackTest: () -> Unit,
     onCheckPlaybackCapture: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     isSharing: Boolean,
     probeRunning: Boolean,
     probeResult: PlaybackCaptureProbeResult?,
@@ -296,15 +293,13 @@ private fun ScreenShareScreen(
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        val recordGranted = results[Manifest.permission.RECORD_AUDIO] != false
-        val notificationGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            results[Manifest.permission.POST_NOTIFICATIONS] != false
-        } else {
-            true
-        }
-        if (recordGranted && notificationGranted) {
+        val evaluation = ProbePermissionHelper.evaluateGrantResults(
+            results.keys.toTypedArray(),
+            results,
+        )
+        if (evaluation.allGranted) {
             launchScreenCapture(projectionLauncher, context)
-        } else if (!recordGranted) {
+        } else if (evaluation.deniedPermissions.contains(Manifest.permission.RECORD_AUDIO)) {
             status = "Microphone permission is required to capture system audio"
         } else {
             status = "Notification permission is required while sharing"
@@ -371,31 +366,7 @@ private fun ScreenShareScreen(
                 }
                 Button(
                     onClick = {
-                        val missing = buildList {
-                            if (ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.RECORD_AUDIO,
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                add(Manifest.permission.RECORD_AUDIO)
-                            }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-                                ContextCompat.checkSelfPermission(
-                                    context,
-                                    com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT,
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                add(com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT)
-                            }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.POST_NOTIFICATIONS,
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                add(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                        }
+                        val missing = ProbePermissionHelper.missingRuntimePermissions(context)
                         if (missing.isEmpty()) {
                             launchScreenCapture(projectionLauncher, context)
                         } else {
@@ -469,9 +440,29 @@ private fun ScreenShareScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = onDismissProbeDialog) {
-                    Text(stringResource(R.string.probe_dialog_ok))
+                if (result.needsPermissionGrant) {
+                    TextButton(
+                        onClick = {
+                            onDismissProbeDialog()
+                            onCheckPlaybackCapture()
+                        },
+                    ) {
+                        Text(stringResource(R.string.probe_dialog_try_again))
+                    }
+                } else {
+                    TextButton(onClick = onDismissProbeDialog) {
+                        Text(stringResource(R.string.probe_dialog_ok))
+                    }
                 }
+            },
+            dismissButton = if (result.needsPermissionGrant) {
+                {
+                    TextButton(onClick = onOpenAppSettings) {
+                        Text(stringResource(R.string.probe_dialog_app_settings))
+                    }
+                }
+            } else {
+                null
             },
         )
     }

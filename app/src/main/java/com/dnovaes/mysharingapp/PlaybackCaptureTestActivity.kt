@@ -37,6 +37,7 @@ import com.dnovaes.mysharingapp.ui.theme.POCSharingVideoAudioTheme
 import com.dnovaes.mysharingapp.webrtc.AudioCaptureRouting
 import com.dnovaes.mysharingapp.webrtc.MediaTestTonePlayer
 import com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture
+import com.dnovaes.mysharingapp.webrtc.ProbePermissionHelper
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
@@ -59,14 +60,19 @@ class PlaybackCaptureTestActivity : ComponentActivity() {
 
     private val uiFrameTick = mutableIntStateOf(0)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingPermissionRequest = emptyArray<String>()
 
     private val permissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
-        if (results.values.all { it }) {
+        val evaluation = ProbePermissionHelper.evaluateGrantResults(pendingPermissionRequest, results)
+        if (evaluation.allGranted) {
             launchProjection()
         } else {
-            appendLog("Permissions denied")
+            appendLog(
+                "Permissions denied: ${evaluation.deniedLabels.joinToString()}. " +
+                    "Tap Start again to re-request, or grant in App settings.",
+            )
         }
     }
 
@@ -124,25 +130,12 @@ class PlaybackCaptureTestActivity : ComponentActivity() {
     }
 
     private fun requestPermissionsAndProjection() {
-        val missing = buildList {
-            if (ContextCompat.checkSelfPermission(this@PlaybackCaptureTestActivity, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                add(Manifest.permission.RECORD_AUDIO)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-                ContextCompat.checkSelfPermission(
-                    this@PlaybackCaptureTestActivity,
-                    PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT,
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                add(PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT)
-            }
-        }
+        val missing = ProbePermissionHelper.missingRuntimePermissions(this)
         if (missing.isEmpty()) {
             launchProjection()
         } else {
-            permissionsLauncher.launch(missing.toTypedArray())
+            pendingPermissionRequest = missing.toTypedArray()
+            permissionsLauncher.launch(pendingPermissionRequest)
         }
     }
 

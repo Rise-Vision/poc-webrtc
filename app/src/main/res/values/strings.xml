@@ -13,5 +13,8 @@
     <string name="check_playback_capture_running">Checking audio playback capture…</string>
     <string name="open_playback_capture_test">Advanced playback capture test</string>
     <string name="probe_dialog_ok">OK</string>
+    <string name="probe_dialog_try_again">Try again</string>
+    <string name="probe_dialog_app_settings">App settings</string>
+    <string name="probe_permissions_required">Permissions required</string>
     <string name="play_test_tone_while_sharing">Play test tone (while sharing)</string>
 </resources>
