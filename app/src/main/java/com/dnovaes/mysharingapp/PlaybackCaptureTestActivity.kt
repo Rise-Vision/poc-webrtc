@@ -310,7 +310,7 @@ private fun PlaybackCaptureTestScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Samsung playback capture test", style = MaterialTheme.typography.headlineSmall)
+            Text("Playback capture test", style = MaterialTheme.typography.headlineSmall)
             Text(
                 "No WebRTC. Measures PCM level from device playback capture.\n\n" +
                     "1. Start → approve screen capture\n" +

@@ -26,11 +26,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,6 +47,9 @@ import androidx.core.content.ContextCompat
 import com.dnovaes.mysharingapp.service.ScreenShareForegroundService
 import com.dnovaes.mysharingapp.signaling.SignalingClient
 import com.dnovaes.mysharingapp.ui.theme.POCSharingVideoAudioTheme
+import com.dnovaes.mysharingapp.webrtc.PlaybackAudioCapture
+import com.dnovaes.mysharingapp.webrtc.PlaybackCaptureProbe
+import com.dnovaes.mysharingapp.webrtc.PlaybackCaptureProbeResult
 import com.dnovaes.mysharingapp.webrtc.ScreenSharePublisher
 
 class MainActivity : ComponentActivity() {
@@ -56,6 +61,66 @@ class MainActivity : ComponentActivity() {
     private var publisher: ScreenSharePublisher? = null
     private var activeProjection: MediaProjection? = null
     private var isSharingState = mutableStateOf(false)
+    private var probeRunningState = mutableStateOf(false)
+    private var probeDialogResultState = mutableStateOf<PlaybackCaptureProbeResult?>(null)
+
+    private val probePermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        if (results.values.all { it }) {
+            launchProbeProjection()
+        } else {
+            finishProbeWithResult(
+                PlaybackCaptureProbeResult(
+                    works = false,
+                    summary = "Permissions denied",
+                    details = "Microphone and (on Android 14+) CAPTURE_MEDIA_OUTPUT are required " +
+                        "for the playback capture check.",
+                    peak = 0,
+                    strategy = null,
+                ),
+            )
+        }
+    }
+
+    private val probeProjectionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK || result.data == null) {
+            finishProbeWithResult(
+                PlaybackCaptureProbeResult(
+                    works = false,
+                    summary = "Screen capture permission denied",
+                    details = "MediaProjection consent is required to test audio playback capture.",
+                    peak = 0,
+                    strategy = null,
+                ),
+            )
+            return@registerForActivityResult
+        }
+        val resultCode = result.resultCode
+        val data = result.data!!
+        ScreenShareForegroundService.runWhenForeground(
+            context = this,
+            resultCode = resultCode,
+            resultData = data,
+            onProjectionStopped = { /* probe is short-lived; ignore */ },
+        ) { projection ->
+            Thread({
+                val probeResult = PlaybackCaptureProbe.run(this@MainActivity, projection)
+                PlaybackCaptureProbe.logResult(probeResult)
+                try {
+                    projection.stop()
+                } catch (_: Exception) {
+                }
+                runOnUiThread {
+                    finishProbeWithResult(probeResult)
+                    ScreenShareForegroundService.markForegroundEnded()
+                    stopService(Intent(this@MainActivity, ScreenShareForegroundService::class.java))
+                }
+            }, "playback-capture-probe").start()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,7 +137,11 @@ class MainActivity : ComponentActivity() {
                     onOpenPlaybackTest = {
                         startActivity(Intent(this, PlaybackCaptureTestActivity::class.java))
                     },
+                    onCheckPlaybackCapture = { startPlaybackCaptureProbe() },
                     isSharing = isSharingState.value,
+                    probeRunning = probeRunningState.value,
+                    probeResult = probeDialogResultState.value,
+                    onDismissProbeDialog = { probeDialogResultState.value = null },
                 )
             }
         }
@@ -119,6 +188,59 @@ class MainActivity : ComponentActivity() {
         ScreenShareForegroundService.markForegroundEnded()
         stopService(Intent(this, ScreenShareForegroundService::class.java))
     }
+
+    private fun startPlaybackCaptureProbe() {
+        if (probeRunningState.value || isSharingState.value) return
+        probeRunningState.value = true
+        PlaybackCaptureProbe.logDeviceInfo()
+
+        val preconditionFailure = PlaybackCaptureProbe.checkPreconditions(this)
+        if (preconditionFailure != null) {
+            PlaybackCaptureProbe.logResult(preconditionFailure)
+            finishProbeWithResult(preconditionFailure)
+            return
+        }
+
+        val missing = buildList {
+            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(PlaybackAudioCapture.PERMISSION_CAPTURE_MEDIA_OUTPUT)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        if (missing.isEmpty()) {
+            launchProbeProjection()
+        } else {
+            probePermissionsLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    private fun launchProbeProjection() {
+        probeProjectionLauncher.launch(
+            getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent(),
+        )
+    }
+
+    private fun finishProbeWithResult(result: PlaybackCaptureProbeResult) {
+        probeRunningState.value = false
+        probeDialogResultState.value = result
+    }
 }
 
 private fun launchScreenCapture(
@@ -136,7 +258,11 @@ private fun ScreenShareScreen(
     onSetMicrophoneMuted: (microphoneMuted: Boolean) -> Unit,
     onPlayTestTone: () -> Unit,
     onOpenPlaybackTest: () -> Unit,
+    onCheckPlaybackCapture: () -> Unit,
     isSharing: Boolean,
+    probeRunning: Boolean,
+    probeResult: PlaybackCaptureProbeResult?,
+    onDismissProbeDialog: () -> Unit,
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("poc_screen_share", Context.MODE_PRIVATE) }
@@ -224,8 +350,22 @@ private fun ScreenShareScreen(
 
             if (!isSharing) {
                 Button(
+                    onClick = onCheckPlaybackCapture,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !probeRunning,
+                ) {
+                    Text(
+                        if (probeRunning) {
+                            stringResource(R.string.check_playback_capture_running)
+                        } else {
+                            stringResource(R.string.check_playback_capture)
+                        },
+                    )
+                }
+                Button(
                     onClick = onOpenPlaybackTest,
                     modifier = Modifier.fillMaxWidth(),
+                    enabled = !probeRunning,
                 ) {
                     Text(stringResource(R.string.open_playback_capture_test))
                 }
@@ -313,5 +453,26 @@ private fun ScreenShareScreen(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+    }
+
+    probeResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = onDismissProbeDialog,
+            title = { Text(result.summary) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "${result.manufacturer} ${result.model} (API ${result.sdkInt})",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Text(text = result.details, style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onDismissProbeDialog) {
+                    Text(stringResource(R.string.probe_dialog_ok))
+                }
+            },
+        )
     }
 }

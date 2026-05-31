@@ -9,6 +9,9 @@
     <string name="status_microphone_muted">Microphone muted — device playback still shared</string>
     <string name="status_microphone_unmuted">Microphone active in stream (device playback paused)</string>
     <string name="playback_capture_test_title">Playback capture test</string>
-    <string name="open_playback_capture_test">Samsung playback capture test</string>
+    <string name="check_playback_capture">Check audio playback capture</string>
+    <string name="check_playback_capture_running">Checking audio playback capture…</string>
+    <string name="open_playback_capture_test">Advanced playback capture test</string>
+    <string name="probe_dialog_ok">OK</string>
     <string name="play_test_tone_while_sharing">Play test tone (while sharing)</string>
 </resources>
